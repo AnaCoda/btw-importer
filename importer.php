@@ -14,6 +14,7 @@ class btw_importer_Importer {
         add_action('wp_ajax_btw_importer_pause_import', [$this, 'ajax_pause_import']);
         add_action('wp_ajax_btw_importer_resume_import', [$this, 'ajax_resume_import']);
         add_action('wp_ajax_btw_importer_cancel_import', [$this, 'ajax_cancel_import']);
+        add_action('wp_ajax_btw_importer_get_users', [$this, 'ajax_get_users']);
     }
 
     public function add_menu() {
@@ -25,9 +26,32 @@ class btw_importer_Importer {
 
     public function enqueue_scripts($hook) {
         if ($hook !== 'toplevel_page_btw-importer') return;
-        wp_enqueue_script('btw-importer', plugin_dir_url(__FILE__).'btw-importer.js', ['jquery'], '4.0.0', true);
-        wp_enqueue_style('btw-importer-style', plugin_dir_url(__FILE__).'btw-importer-style.css', [], '4.0.0');
-        wp_localize_script('btw-importer', 'btw_importer', ['ajaxUrl' => admin_url('admin-ajax.php'), 'nonce' => wp_create_nonce('btw_importer_nonce')]);
+        wp_enqueue_script('btw-importer', plugin_dir_url(__FILE__).'btw-importer.js', ['jquery'], '4.2.0', true);
+        wp_enqueue_style('btw-importer-style', plugin_dir_url(__FILE__).'btw-importer-style.css', [], '4.2.0');
+
+        wp_localize_script('btw-importer', 'btw_importer', (object)[
+            'ajaxUrl' => admin_url('admin-ajax.php'), 
+            'nonce' => wp_create_nonce('btw_importer_nonce'),
+        ]);
+    }
+
+    public function ajax_get_users() {
+        check_ajax_referer('btw_importer_nonce', 'nonce');
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error('Unauthorized');
+        }
+        $users = get_users([
+            'orderby' => 'display_name',
+            'order'   => 'ASC',
+        ]);
+        $result = [];
+        foreach ($users as $user) {
+            $result[] = [
+                'id'   => (int) $user->ID,
+                'name' => $user->display_name,
+            ];
+        }
+        wp_send_json_success($result);
     }
 
     public function import_page() {
@@ -114,6 +138,22 @@ class btw_importer_Importer {
                     <h2><span class="dashicons dashicons-download"></span> Step 3: Import Content</h2>
                 </div>
                 <div id="btw_import_info" class="btw_importer_info_box"></div>
+
+                <div id="btw_importer_author_selector" class="btw_importer_author_selector" style="display:none; margin-bottom: 25px; padding: 20px; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06);">
+                    <h3 style="margin-top:0;"><span class="dashicons dashicons-admin-users"></span> Author for Imported Posts</h3>
+                    <p class="description">Choose which WordPress user will be the author of the imported content.</p>
+                    
+                    <div style="margin-bottom: 15px;">
+                        <input type="checkbox" id="btw_importer_use_original_author" checked>
+                        <label for="btw_importer_use_original_author" style="cursor:pointer;">Use original Blogger author (match by name or fallback to admin)</label>
+                    </div>
+                    
+                    <div id="btw_importer_author_dropdown_wrap" style="display:none;">
+                        <label for="btw_importer_author_select" style="display: block; margin-bottom: 8px; font-weight:600;">Select WordPress User:</label>
+                        <select id="btw_importer_author_select" class="widefat" style="max-width: 100%;"></select>
+                    </div>
+                </div>
+
                 <div class="btw_importer_batch_settings">
                         <label class="btw_importer_batch_label">Batch Size:</label>
                         <div class="btw_importer_radio_group">
@@ -341,6 +381,9 @@ class btw_importer_Importer {
         
         $batch_size = isset($_POST['batchSize']) ? absint($_POST['batchSize']) : 3;
         $batch_size = max(1, min($batch_size, 10));
+        
+        $author_id = isset($_POST['author_id']) ? absint($_POST['author_id']) : 0;
+        
         $status = get_option('btw_importer_status');
         
         if ($status['status'] === 'paused') {
@@ -358,7 +401,7 @@ class btw_importer_Importer {
         
         $results = [];
         foreach ($batch as $post_data) {
-            $result = $this->import_single_post_internal($post_data);
+            $result = $this->import_single_post_internal($post_data, $author_id);
             $results[] = $result;
             $status['processed']++;
         }
@@ -426,7 +469,7 @@ class btw_importer_Importer {
         return $url;
     }
 
-    private function import_single_post_internal($raw_post) {
+    private function import_single_post_internal($raw_post, $override_author_id = 0) {
         $title = sanitize_text_field($raw_post['title'] ?? '');
         $author = sanitize_text_field($raw_post['author'] ?? '');
         $post_type = in_array($raw_post['post_type'], ['post','page']) ? $raw_post['post_type'] : 'post';
@@ -453,7 +496,10 @@ class btw_importer_Importer {
         }
         
         $author_id = 1;
-        if ($author) {
+        
+        if ($override_author_id > 0) {
+            $author_id = $override_author_id;
+        } elseif ($author) {
             $user = get_user_by('login', sanitize_user($author, true));
             if ($user) $author_id = $user->ID;
         }
